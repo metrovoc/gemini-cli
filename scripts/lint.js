@@ -15,7 +15,7 @@ import {
   lstatSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, delimiter } from 'node:path';
 
 const ACTIONLINT_VERSION = '1.7.7';
 const SHELLCHECK_VERSION = '0.11.0';
@@ -44,6 +44,12 @@ function getPlatformArch() {
       shellcheck: 'darwin.aarch64',
     };
   }
+  if (platform === 'win32' && arch === 'x64') {
+    return {
+      actionlint: 'windows_amd64',
+      shellcheck: 'zip',
+    };
+  }
   throw new Error(`Unsupported platform/architecture: ${platform}/${arch}`);
 }
 
@@ -62,6 +68,32 @@ const yamllintCheck =
     ? `if exist "${PYTHON_VENV_PATH}\\Scripts\\yamllint.exe" (exit 0) else (exit 1)`
     : `test -x "${PYTHON_VENV_PATH}/bin/yamllint"`;
 
+const actionlintUrl =
+  process.platform === 'win32'
+    ? `https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_${platformArch.actionlint}.zip`
+    : `https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_${platformArch.actionlint}.tar.gz`;
+
+const actionlintArchive =
+  process.platform === 'win32' ? '.actionlint.zip' : '.actionlint.tgz';
+
+const actionlintExtract =
+  process.platform === 'win32'
+    ? `tar -xf "${TEMP_DIR}/${actionlintArchive}" -C "${TEMP_DIR}/actionlint"`
+    : `tar -xzf "${TEMP_DIR}/${actionlintArchive}" -C "${TEMP_DIR}/actionlint"`;
+
+const shellcheckUrl =
+  process.platform === 'win32'
+    ? `https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/shellcheck-v${SHELLCHECK_VERSION}.zip`
+    : `https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/shellcheck-v${SHELLCHECK_VERSION}.${platformArch.shellcheck}.tar.xz`;
+
+const shellcheckArchive =
+  process.platform === 'win32' ? '.shellcheck.zip' : '.shellcheck.txz';
+
+const shellcheckExtract =
+  process.platform === 'win32'
+    ? `tar -xf "${TEMP_DIR}/${shellcheckArchive}" -C "${TEMP_DIR}/shellcheck"`
+    : `tar -xf "${TEMP_DIR}/${shellcheckArchive}" -C "${TEMP_DIR}/shellcheck" --strip-components=1`;
+
 /**
  * @typedef {{
  *   check: string;
@@ -75,11 +107,13 @@ const yamllintCheck =
  */
 const LINTERS = {
   actionlint: {
-    check: 'command -v actionlint',
+    check:
+      process.platform === 'win32'
+        ? 'where actionlint'
+        : 'command -v actionlint',
     installer: `
-      mkdir -p "${TEMP_DIR}/actionlint"
-      curl -sSLo "${TEMP_DIR}/.actionlint.tgz" "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_${platformArch.actionlint}.tar.gz"
-      tar -xzf "${TEMP_DIR}/.actionlint.tgz" -C "${TEMP_DIR}/actionlint"
+      curl -sSLo "${TEMP_DIR}/${actionlintArchive}" "${actionlintUrl}"
+      ${actionlintExtract}
     `,
     run: `
       actionlint \
@@ -91,11 +125,13 @@ const LINTERS = {
     `,
   },
   shellcheck: {
-    check: 'command -v shellcheck',
+    check:
+      process.platform === 'win32'
+        ? 'where shellcheck'
+        : 'command -v shellcheck',
     installer: `
-      mkdir -p "${TEMP_DIR}/shellcheck"
-      curl -sSLo "${TEMP_DIR}/.shellcheck.txz" "https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/shellcheck-v${SHELLCHECK_VERSION}.${platformArch.shellcheck}.tar.xz"
-      tar -xf "${TEMP_DIR}/.shellcheck.txz" -C "${TEMP_DIR}/shellcheck" --strip-components=1
+      curl -sSLo "${TEMP_DIR}/${shellcheckArchive}" "${shellcheckUrl}"
+      ${shellcheckExtract}
     `,
     run: `
       git ls-files | grep -E '^([^.]+|.*\\.(sh|zsh|bash))' | xargs file --mime-type \
@@ -123,8 +159,15 @@ const LINTERS = {
 function runCommand(command, stdio = 'inherit') {
   try {
     const env = { ...process.env };
+    const pathKey =
+      Object.keys(env).find((key) => key.toLowerCase() === 'path') || 'PATH';
     const nodeBin = join(process.cwd(), 'node_modules', '.bin');
-    env.PATH = `${nodeBin}:${TEMP_DIR}/actionlint:${TEMP_DIR}/shellcheck:${PYTHON_VENV_PATH}/bin:${env.PATH}`;
+    const venvBin = join(
+      PYTHON_VENV_PATH,
+      process.platform === 'win32' ? 'Scripts' : 'bin',
+    );
+    env[pathKey] =
+      `${nodeBin}${delimiter}${TEMP_DIR}/actionlint${delimiter}${TEMP_DIR}/shellcheck${delimiter}${venvBin}${delimiter}${env[pathKey]}`;
     execSync(command, { stdio, env });
     return true;
   } catch (_e) {
@@ -141,6 +184,7 @@ export function setupLinters() {
     const { check, installer } = LINTERS[linter];
     if (!runCommand(check, 'ignore')) {
       console.log(`Installing ${linter}...`);
+      mkdirSync(join(TEMP_DIR, linter), { recursive: true });
       if (!runCommand(installer)) {
         console.error(
           `Failed to install ${linter}. Please install it manually.`,
